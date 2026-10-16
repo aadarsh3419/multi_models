@@ -1,0 +1,2 @@
+[console_scripts]
+healthcare-text = healthcare_agents.cli:main

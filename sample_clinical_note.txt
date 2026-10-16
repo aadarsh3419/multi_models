@@ -1,0 +1,24 @@
+Patient Name: [REDACTED]
+Date of Encounter: 2025-04-03
+Chief Complaint: Follow-up for Type 2 Diabetes Mellitus and Hypertension.
+
+History of Present Illness:
+Patient is a 54-year-old presenting for routine chronic disease follow-up.
+Patient reports feeling well and denies chest pain or shortness of breath.
+Family history: Father had coronary artery disease at age 52.
+
+Physical Examination & Vitals:
+- Blood Pressure: 128/82 mmHg (sitting, right arm)
+- Heart Rate: 72 bpm, regular rhythm
+- Respiratory Rate: 16 breaths/min
+- Temperature: 37.0 C
+
+Laboratory Results (2025-04-03):
+- Fasting Blood Glucose: 118 mg/dL (Reference Range: 70-99 mg/dL) [Flag: High]
+- Hemoglobin A1c: 6.8 % (Reference Range: 4.0-5.6 %) [Flag: H]
+- Serum Potassium: 4.5 mEq/L (Reference Range: 3.5-5.0 mEq/L)
+
+Current Medications:
+- Metformin 500 mg oral twice daily for 6 months.
+- Lisinopril 10 mg oral once daily.
+

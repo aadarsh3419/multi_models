@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: healthcare-text-foundation
+Version: 0.1.0
+Summary: Milestone 1 — Healthcare Text Extraction Foundation: Safe, Evidence-Preserving Clinical Text Extraction
+Author: Healthcare Multi-Agent Platform Engineering Team
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic>=2.7.0
+Requires-Dist: pydantic-settings>=2.2.0
+Requires-Dist: groq>=0.9.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: ruff>=0.4.0; extra == "dev"
