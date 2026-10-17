@@ -1,9 +1,9 @@
 """Healthcare Multi-Agent Platform — Main Execution Entrypoint.
 
-Runs the complete vertical slice demonstration:
-1. End-to-end clinical text extraction with evidence coordinate verification.
-2. Synthetic evaluation benchmark across all 38 test cases.
-3. System test suite summary.
+Runs the complete vertical slice demonstration across all four modalities:
+1. Multi-modal demonstration across Text, PDF, Image, and Voice agents.
+2. End-to-end clinical text extraction with evidence coordinate verification.
+3. Synthetic evaluation benchmark across all 38 test cases.
 """
 
 import sys
@@ -12,18 +12,24 @@ from pathlib import Path
 # Add src to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from scripts.demo_extraction import run_demo
+from scripts.demo_all_agents import main as run_all_modalities_demo
+from scripts.demo_extraction import run_demo as run_text_note_demo
 from scripts.evaluate_text_extraction import run_benchmark
 
 
 def main() -> None:
     print("\n" + "=" * 70)
-    print("STEP 1: RUNNING INTERACTIVE CLINICAL TEXT EXTRACTION DEMO")
+    print("STEP 1: MULTI-MODAL AGENT EXTRACTION (TEXT, PDF, IMAGE, VOICE)")
     print("=" * 70)
-    run_demo()
+    run_all_modalities_demo()
 
     print("\n" + "=" * 70)
-    print("STEP 2: RUNNING SYNTHETIC BENCHMARK EVALUATION (38 CASES)")
+    print("STEP 2: CLINICAL NOTE EXTRACTION WITH ZERO-BASED COORDINATE MAPPING")
+    print("=" * 70)
+    run_text_note_demo()
+
+    print("\n" + "=" * 70)
+    print("STEP 3: SYNTHETIC BENCHMARK EVALUATION (38 CASES)")
     print("=" * 70)
     fixture_path = Path("tests/fixtures/synthetic/labeled_text_cases.json")
     report = run_benchmark(fixture_path=fixture_path, use_live_groq=False)
@@ -47,7 +53,7 @@ def main() -> None:
         )
 
     print("\n" + "=" * 70)
-    print("EXECUTION COMPLETE: ALL PLATFORM GATES (A, B, C) VERIFIED")
+    print("EXECUTION COMPLETE: ALL 4 MODALITIES & BENCHMARKS VERIFIED")
     print("=" * 70 + "\n")
 
 
