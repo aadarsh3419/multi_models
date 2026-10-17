@@ -93,3 +93,139 @@ The standardized contract emitted across the platform:
 - `errors`: Machine-readable `StructuredError` records.
 - `audit_metadata`: Complete runtime provenance, prompt version, prompt template hash, token usage, and system versioning.
 
+---
+
+## 3. Milestone 2: PDF Agent Contracts & Provenance Locations
+
+Milestone 2 introduces additive contracts for ingesting and spatially locating clinical facts within PDF documents. All Milestone 1 contracts remain frozen and fully compatible.
+
+### A. PDFAgentRequest & PDFAgentOptions
+
+```python
+class PDFAgentOptions(BaseModel):
+    ocr_mode: Literal["auto", "never", "always"] = "auto"
+    ocr_languages: str = "eng"  # strictly validated by regex ^[a-z]{3}(\+[a-z]{3})*$
+    date_order_hint: Literal["UNKNOWN", "DMY", "MDY"] | None = None
+    include_source_text_in_result: bool = False
+
+
+class PDFAgentRequest(BaseModel):
+    request_id: UUID = Field(default_factory=uuid4)
+    source_name: str | None = Field(default=None, repr=False)
+    content: bytes = Field(..., exclude=True, repr=False)
+    options: PDFAgentOptions = Field(default_factory=PDFAgentOptions)
+```
+
+- **PHI Security**: `content` bytes are marked with `exclude=True` and `repr=False`. Raw file bytes are never emitted in logs, exception traces, or JSON serialization.
+- **Source Privacy**: `source_name` (e.g. filename) is kept internally and redacted from `__repr__`, `__str__`, and default audit logs to avoid leaking patient identifiers embedded in filenames.
+
+### B. PdfLocation Contract (Spatial Provenance)
+
+When facts are extracted from PDF documents, their `evidence_records[].location` contains a `PdfLocation`:
+
+```python
+class PdfLocation(BaseModel):
+    kind: Literal["pdf"] = "pdf"
+    page_number: int = Field(ge=1, description="1-indexed page number.")
+    bbox: list[float] = Field(description="[x0, y0, x1, y1] bounding box in PDF points.")
+    coordinate_system: Literal["pdf_points_top_left"] = "pdf_points_top_left"
+    page_width: float
+    page_height: float
+    rotation: int = 0  # 0, 90, 180, or 270 degrees
+    block_id: str | None = None
+    line_id: str | None = None
+    table_id: str | None = None
+    row_id: str | None = None
+    cell_id: str | None = None
+    cell_char_spans: list[tuple[int, int]] | None = None
+    extraction_method: str | None = None  # e.g. "pymupdf:native" or "ocr:tesseract"
+    ocr_words: list[dict[str, Any]] | None = None
+    layout_group_id: str | None = None
+```
+
+- **Top-Left Unrotated Point Coordinates**: Regardless of original display rotation, coordinates are normalized to the unrotated page coordinate space ($72\text{ points per inch}$).
+- **Evidence Quote Span**: `EvidenceRecord.quote_char_span: tuple[int, int] | None` records the start and end character offsets within the referenced segment's text.
+
+### C. Shared OcrService Contracts
+
+The image-agnostic OCR service defines standard tokens and lines:
+
+```python
+class OCRWord(BaseModel):
+    text: str
+    bbox: list[int]  # [x0, y0, x1, y1] pixel coordinates
+    confidence: float | None = None  # 0.0 - 100.0
+
+
+class OCRLine(BaseModel):
+    text: str
+    bbox: list[int]  # [x0, y0, x1, y1] pixel bounding box enclosing line
+    words: list[OCRWord] = Field(default_factory=list)
+    block_id: int = 1
+    par_id: int = 1
+    line_id: int = 1
+
+
+class OCRResult(BaseModel):
+    text: str
+    lines: list[OCRLine] = Field(default_factory=list)
+    words: list[OCRWord] = Field(default_factory=list)
+    language: str = "eng"
+    engine_version: str = "tesseract"
+```
+
+---
+
+## 4. Milestone 3: Image Agent Contracts & Pixel Provenance
+
+Milestone 3 introduces additive contracts for ingesting document images (photos of prescriptions, scanned lab slips, clinic notes). All M1 and M2 contracts remain frozen and fully compatible.
+
+### A. ImageAgentRequest & ImageAgentOptions
+
+```python
+class ImageAgentOptions(BaseModel):
+    ocr_languages: str = "eng"  # strictly validated by regex ^[a-z]{3}(\+[a-z]{3})*$
+    date_order_hint: Literal["UNKNOWN", "DMY", "MDY"] | None = None
+    include_source_text_in_result: bool = False
+    upscale_enabled: bool = True  # Enable Lanczos upscaling when shorter side < 1000px
+
+
+class ImageAgentRequest(BaseModel):
+    request_id: UUID = Field(default_factory=uuid4)
+    source_name: str | None = Field(default=None, repr=False)
+    content: bytes = Field(..., exclude=True, repr=False)
+    options: ImageAgentOptions = Field(default_factory=ImageAgentOptions)
+```
+
+- **PHI Security**: `content` raw bytes are marked `exclude=True` and `repr=False`. Raw image bytes are never serialized or logged.
+- **Source Privacy**: `source_name` is redacted in string representations to prevent filename PHI leakage.
+
+### B. ImageLocation Contract (Display Pixel Provenance)
+
+When facts are extracted from image documents, `evidence_records[].location` contains an `ImageLocation`:
+
+```python
+class ImageLocation(BaseModel):
+    kind: Literal["image"] = "image"
+    bbox: list[float] = Field(description="[x0, y0, x1, y1] bounding box in displayed pixel space.")
+    original_width: int
+    original_height: int
+    coordinate_system: str = "pixel_top_left"  # or "oriented_pixel_top_left"
+    exif_orientation: int | None = None  # 1-8
+    oriented_width: int | None = None
+    oriented_height: int | None = None
+    extraction_method: str | None = "ocr:tesseract"
+    ocr_words: list[dict[str, Any]] | None = None
+    layout_group_id: str | None = None
+```
+
+- **Displayed Pixel Space**: Coordinates $[px_0, py_0, px_1, py_1]$ represent displayed image pixels after EXIF orientation transposition.
+- **Invertible Upscaling Provenance**: When smaller images are upscaled during OCR preprocessing, coordinates are automatically divided by the scaling factor $S$ so bounding boxes align exactly with the input image.
+
+### C. Milestone 3 Error and Warning Codes
+
+- `ErrorCode.IMAGE_PIXEL_LIMIT_EXCEEDED = "image_pixel_limit_exceeded"`: Image uncompressed dimensions exceed configured limit (`MAX_IMAGE_PIXELS=30,000,000`).
+- `WarningCode.OCR_LOW_CONFIDENCE = "ocr_low_confidence"`: One or more OCR word tokens fell below `OCR_LOW_CONFIDENCE=60.0`.
+
+
+

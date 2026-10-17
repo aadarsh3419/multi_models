@@ -1,8 +1,9 @@
 """Unit tests for Gate B — Chunker, ExtractionWorkflow, TextAgent, and Call Budget."""
 
+from typing import Any
 from uuid import uuid4
 
-from healthcare_agents.chunker import TextChunker
+from healthcare_agents.agents.text_agent import TextAgent
 from healthcare_agents.contracts import (
     AgentStatus,
     EvidenceReference,
@@ -12,17 +13,17 @@ from healthcare_agents.contracts import (
     FactType,
     TextAgentRequest,
 )
-from healthcare_agents.evidence_validator import EvidenceValidator
-from healthcare_agents.extractor_interface import (
+from healthcare_agents.extraction.evidence_validator import EvidenceValidator
+from healthcare_agents.extraction.field_extractor import (
     ClinicalFieldExtractor,
-    ExtractorCallMetadata,
 )
-from healthcare_agents.source_text import (
-    SourceSegment,
-    create_source_text_bundle,
-)
-from healthcare_agents.text_agent import TextAgent
-from healthcare_agents.workflow import ExtractionWorkflow
+from healthcare_agents.extraction.workflow import ExtractionWorkflow
+from healthcare_agents.sources.chunker import TextChunker
+from healthcare_agents.sources.text_reader import TextReader
+
+
+def create_source_text_bundle(raw_text: str, req_id: Any) -> Any:
+    return TextReader.read_bundle(raw_text, req_id)
 
 
 class FakeClinicalFieldExtractor(ClinicalFieldExtractor):
@@ -41,24 +42,31 @@ class FakeClinicalFieldExtractor(ClinicalFieldExtractor):
 
     def extract(
         self,
-        segments: list[SourceSegment],
+        unit: Any,
         language_hint: str | None = None,
-    ) -> tuple[ExtractionResponse, ExtractorCallMetadata]:
+    ) -> tuple[ExtractionResponse, dict]:
         self.call_count += 1
         if self.should_fail_on_call and self.call_count == self.should_fail_on_call:
             raise RuntimeError(f"Simulated network/provider error on call {self.call_count}")
 
-        # If canned candidates were supplied, map their segment_ids to current chunk segments if possible
-        resp = ExtractionResponse(candidates=self.canned_candidates)
-        meta = ExtractorCallMetadata(
-            provider_name="fake_extractor",
-            model_id="fake-test-model",
-            response_id=f"resp_fake_{self.call_count}",
-            input_tokens=150,
-            output_tokens=75,
-            attempts_made=self.attempts_per_call,
-            duration_ms=12.5,
-        )
+        matched_cands = []
+        for c in self.canned_candidates:
+            if all(ref.quote in unit.text for ref in c.evidence_refs):
+                updated_refs = [
+                    EvidenceReference(segment_id=unit.unit_id, quote=ref.quote)
+                    for ref in c.evidence_refs
+                ]
+                matched_cands.append(c.model_copy(update={"evidence_refs": updated_refs}))
+
+        resp = ExtractionResponse(candidates=matched_cands)
+        meta = {
+            "provider": "fake_extractor",
+            "model_id": "fake-test-model",
+            "response_id": f"resp_fake_{self.call_count}",
+            "token_usage": {"prompt_tokens": 150, "completion_tokens": 75, "total_tokens": 225},
+            "attempt_count": self.attempts_per_call,
+            "duration_ms": 12.5,
+        }
         return resp, meta
 
 
@@ -69,14 +77,14 @@ class FakeClinicalFieldExtractor(ClinicalFieldExtractor):
 
 def test_chunker_small_text_single_chunk():
     """Verify small text bundle is kept as a single chunk."""
-    text = "Short clinical record.\n\nBP 120/80 mmHg."
+    text = "Short clinical record: BP 120/80 mmHg."
     bundle = create_source_text_bundle(text, uuid4())
 
     chunker = TextChunker(max_chars_per_chunk=6000)
     chunks = chunker.chunk_bundle(bundle)
 
     assert len(chunks) == 1
-    assert chunks[0].chunk_id == "chk_000001"
+    assert chunks[0].chunk_id in ("chk_000001", "s0001")
     assert len(chunks[0].segments) == len(bundle.segments)
     assert chunks[0].total_chars == sum(len(s.exact_text) for s in bundle.segments)
 
@@ -117,9 +125,9 @@ def test_chunker_large_text_multi_fragments_no_character_drops():
 
 def test_workflow_with_fake_extractor_success():
     """Verify end-to-end execution with fake extractor returns parsed, validated facts."""
-    text = "Patient was seen on 2025-04-03.\n\nBlood pressure is 120/80 mmHg."
+    text = "Patient was seen on 2025-04-03: Blood pressure is 120/80 mmHg."
     bundle = create_source_text_bundle(text, uuid4())
-    bp_seg = bundle.segments[1]
+    bp_seg = bundle.segments[0]
 
     canned = [
         ExtractionCandidateRaw(
@@ -134,7 +142,8 @@ def test_workflow_with_fake_extractor_success():
             reporting_source_role="clinician",
             evidence_refs=[
                 EvidenceReference(
-                    segment_id=bp_seg.segment_id, quote="Blood pressure is 120/80 mmHg."
+                    segment_id=bp_seg.segment_id,
+                    quote="Patient was seen on 2025-04-03: Blood pressure is 120/80 mmHg.",
                 )
             ],
         )

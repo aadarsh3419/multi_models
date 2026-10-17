@@ -1,68 +1,87 @@
-# Agent System Architecture & Future Multimodal Contracts
+# Multi-Modal Agent System Architecture & Contracts
 
-This document outlines the agent contracts for the Healthcare Multi-Agent AI Platform.
-Milestone 1 implements the foundational **Text Agent**. Future agents are documented here to specify interface boundaries and integration expectations.
+This document outlines the agent contracts for the Healthcare Multi-Agent AI Platform across all four operational modalities: **Text**, **PDF**, **Image**, and **Voice**.
 
 ---
 
-## 1. Implemented Agent: Text Agent
+## 1. Unified Agent Contract (`BaseAgent`)
 
-- **Role**: Ingests unstructured or semi-structured clinical narratives (English, Hindi, Hinglish), preserves raw character coordinates, and produces grounded, validated clinical fact candidates.
+All agents implement the common synchronous `BaseAgent[TRequest]` interface and return a standardized `AgentResult`:
+
+```python
+class BaseAgent(ABC, Generic[TRequest]):
+    @abstractmethod
+    def process(self, request: TRequest) -> AgentResult:
+        """Process a modality-specific request into validated, evidence-grounded FactCandidates."""
+        raise NotImplementedError
+```
+
+Every agent orchestrates a modality-specific `Reader` to generate a `SourceTextBundle`, which is then passed to the shared, modality-agnostic `ExtractionWorkflow`.
+
+---
+
+## 2. Implemented Modality Agents
+
+### A. Text Agent (`TextAgent`)
+- **Modality**: Unstructured or semi-structured clinical narratives (English, Hindi, Hinglish).
+- **Ingestion**: `TextReader` performing lossless paragraph/line segmentation and Unicode code-point indexing.
 - **Contract**:
-  - Input: `TextAgentRequest` (contains raw string `text`, optional `language_hint`, validated `TextAgentOptions`).
-  - Output: `AgentResult` (status, source metadata, validated `FactCandidate` records, audit metadata, structured errors).
-- **Core Guarantees**:
-  - Untouched source text preservation: offsets represent zero-based Python string indices (`len(str)` code points).
-  - Strict evidence verification: facts must cite verbatim quotations from source segments.
-  - Deterministic candidate IDs and exact deduplication.
+  - Request: `TextAgentRequest(text: str, options: TextAgentOptions)`
+  - Provenance: `TextLocation(kind="text", start_char=int, end_char=int)`
+  - Result: `AgentResult` with `agent_name="text_agent"`
+
+### B. PDF Agent (`PDFAgent`)
+- **Modality**: Native and scanned clinical documents (discharge summaries, laboratory reports, multi-column forms).
+- **Ingestion**: `PdfReader` with PyMuPDF in-memory parsing, table extraction (`find_tables`), render pixel budgeting, selective OCR planning (`plan_page_ocr`), and native/OCR IoU deduplication.
+- **Contract**:
+  - Request: `PDFAgentRequest(content: bytes, source_name: str, options: PDFAgentOptions)`
+  - Provenance: `PdfLocation(kind="pdf", page_number=int, bbox=[x0, y0, x1, y1], ocr_words=..., cell_char_spans=...)`
+  - Result: `AgentResult` with `agent_name="pdf_agent"`
+
+### C. Image Agent (`ImageAgent`)
+- **Modality**: Document photographs, scanned prescription slips, paper lab reports (PNG, JPEG, WEBP, BMP, TIFF).
+- **Ingestion**: `ImageReader` with Pillow safety hardening (15MB cap, 30MP pre-load check, decompression bomb defense), EXIF transpose, invertible Lanczos upscale, and OCR word confidence scoring.
+- **Contract**:
+  - Request: `ImageAgentRequest(content: bytes, source_name: str, options: ImageAgentOptions)`
+  - Provenance: `ImageLocation(kind="image", bbox=[x0, y0, x1, y1], coordinate_system="pixel_top_left", ocr_words=...)`
+  - Result: `AgentResult` with `agent_name="image_agent"`
+
+### D. Voice Agent (`VoiceAgent`)
+- **Modality**: Dictations, telehealth consultations, recorded doctor-patient audio (WAV, MP3, OGG, FLAC, M4A, WEBM).
+- **Ingestion**: `AudioReader` with pre-ffprobe magic byte sniffing, bounded subprocess inspect (1MB output cap, 20s timeout, tempfile cleanup), duration checks ($\le 30$ mins), and Groq Whisper transcription (`whisper-large-v3-turbo`).
+- **Contract**:
+  - Request: `VoiceAgentRequest(content: bytes, source_name: str, options: VoiceAgentOptions)`
+  - Provenance: `AudioLocation(kind="audio", start_ms=int, end_ms=int, speaker_id=...)`
+  - Result: `AgentResult` with `agent_name="voice_agent"`
 
 ---
 
-## 2. Deferred Multimodal Agents (Future Milestones)
+## 3. Core Architectural Guarantees
 
-The platform architecture defines standard contracts for future modalities. These agents will build upon the same shared `ExtractionWorkflow`, `ClinicalFieldExtractor`, and `AgentResult` contracts.
-
-### A. PDF Agent
-- **Future Modality**: Native and scanned clinical documents (discharge summaries, laboratory reports, insurance forms).
-- **Future Ingestion Tools**: PyMuPDF (`fitz`), pdfplumber.
-- **Contract Specification**:
-  - Request: `PdfAgentRequest(file_path: Path | bytes, ocr_fallback: bool = True)`
-  - Modality Source Mapping: Maps text spans to page numbers and bounding boxes `[x0, y0, x1, y1]`.
-  - Extension Point: `SourceSegment.multimodal_location = {"page": int, "bbox": [float, float, float, float]}`.
-  - Result: Common `AgentResult` with `agent_name="pdf"`.
-
-### B. Image Agent
-- **Future Modality**: Scanned prescriptions, photographs of lab slips, mobile camera document captures.
-- **Future Ingestion Tools**: Pillow (`PIL`), Tesseract OCR / Vision Models.
-- **Contract Specification**:
-  - Request: `ImageAgentRequest(image_bytes: bytes, mime_type: str, preprocess: bool = True)`
-  - Modality Source Mapping: Bounding box region of interest (ROI) and polygon coordinates.
-  - Extension Point: `SourceSegment.multimodal_location = {"roi_polygon": list[tuple[int, int]]}`.
-  - Result: Common `AgentResult` with `agent_name="image"`.
-
-### C. Voice Agent
-- **Future Modality**: Recorded doctor-patient consultations, dictated physician notes, telehealth voice audio.
-- **Future Ingestion Tools**: FFmpeg, Whisper / Speech-to-Text models.
-- **Contract Specification**:
-  - Request: `VoiceAgentRequest(audio_stream: bytes, sample_rate: int, language_hint: str | None)`
-  - Modality Source Mapping: Audio segment timestamps `[start_ms, end_ms]` and speaker diarization labels.
-  - Extension Point: `SourceSegment.multimodal_location = {"timestamp_ms": [int, int], "speaker": str}`.
-  - Result: Common `AgentResult` with `agent_name="voice"`.
+1. **Untouched Source Coordinates**:
+   Offsets and locations represent exact zero-based indices (Unicode code points, PDF points, image display pixels, or audio milliseconds).
+2. **Strict Independent Grounding**:
+   LLMs are never trusted to output coordinates. `EvidenceValidator` verifies verbatim quotes independently against raw source segments.
+3. **Deterministic Candidate Deduplication**:
+   Exact duplicate candidates are merged while retaining distinct citations. Conflicting facts (e.g. contradictory blood glucose readings) are preserved with distinct candidate IDs.
+4. **PHI Isolation by Default**:
+   `ALLOW_REMOTE_LLM_PROCESSING=false` and `ALLOW_REMOTE_AUDIO_TRANSCRIPTION=false` ensure zero network transmission by default. All requests and results redact sensitive strings and byte payloads in `__repr__` and `__str__`.
 
 ---
 
-## 3. Future Platform Infrastructure Connections
+## 4. Platform Infrastructure Connections
 
-In future milestones, the outputs of all modality agents will connect to shared enterprise infrastructure:
+The platform architecture defines standard connections to enterprise services (detailed in `docs/integration-plan.md`):
 
-1. **Storage & Database Layer**:
-   - **MongoDB**: Storage of structured `AgentResult` JSON, patient encounter documents, and candidate revisions.
-   - **Object Storage (S3/MinIO)**: Encrypted, HIPAA-compliant raw document and audio storage (storing source content securely away from operational databases).
-2. **Orchestrator**:
-   - Routes incoming patient inputs (MIME type inspection) to the appropriate modality agent (`text`, `pdf`, `image`, `voice`).
-   - Merges cross-modal extraction results into an encounter-level longitudinal graph.
-3. **ML Model Registry & Disease Inference**:
-   - Consumes validated `FactCandidate` records (e.g., fasting glucose, blood pressure, HbA1c) to trigger specialized predictive models (e.g. cardiovascular risk scores, diabetic retinopathy risk).
-4. **Doctor Dashboard & Patient Summaries**:
-   - Generates read-only, evidence-grounded summaries with interactive citation hovering linking back to original PDF pages, text spans, or audio playback timestamps.
-
+1. **Storage & Persistence**:
+   - **MongoDB**: Encrypted storage of `AgentResult` JSON, encounter aggregates, and candidate review histories.
+   - **Object Storage (S3/MinIO)**: Encrypted storage of raw binaries outside operational database collections.
+2. **FastAPI Gateway & Orchestrator**:
+   - JWT Role-Based Access Control (`clinician`, `radiologist`, `patient`, `auditor`, `admin`).
+   - MIME type inspection and dispatch to the matching modality agent.
+3. **FHIR R4 Interoperability**:
+   - `FactCandidate` mapped to FHIR `Observation`, `Condition`, `MedicationStatement`, `AllergyIntolerance`, and `Provenance`.
+4. **Predictive Clinical Models**:
+   - Validated candidate features feed into calibrated risk models (ASCVD 10-year risk score, diabetic triage).
+5. **Doctor Review Dashboard**:
+   - Interactive evidence linking with real-time text highlighting, PDF bounding box overlays, image ROI boxes, and audio citation playback.

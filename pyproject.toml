@@ -16,6 +16,9 @@ dependencies = [
     "pydantic>=2.7.0",
     "pydantic-settings>=2.2.0",
     "groq>=0.9.0",
+    "pymupdf>=1.24.0",
+    "Pillow>=10.0.0",
+    "pytesseract>=0.3.10",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +40,8 @@ pythonpath = ["src"]
 markers = [
     "live_api: marks tests requiring live external API access (skipped by default unless RUN_LIVE_API_TESTS=true)",
     "slow: marks slow-running tests",
+    "ocr_integration: marks tests requiring real Tesseract OCR binary and language data",
+    "audio_integration: marks tests requiring real ffprobe or external audio tools",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

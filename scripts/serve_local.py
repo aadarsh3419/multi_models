@@ -611,11 +611,12 @@ class HealthcareHTTPRequestHandler(BaseHTTPRequestHandler):
 
 
 def start_server(port: int = 8000) -> None:
-    server_address = ("", port)
+    server_address = ("127.0.0.1", port)
     httpd = HTTPServer(server_address, HealthcareHTTPRequestHandler)
     print("\n=======================================================")
     print("  HEALTHCARE LOCALHOST SERVER RUNNING")
     print(f"  Open your browser at: http://localhost:{port}")
+    print(f"  Local loopback URL:   http://127.0.0.1:{port}")
     print("=======================================================\n")
     try:
         httpd.serve_forever()
@@ -625,4 +626,10 @@ def start_server(port: int = 8000) -> None:
 
 
 if __name__ == "__main__":
-    start_server(8000)
+    port_to_run = 8000
+    if len(sys.argv) > 1:
+        try:
+            port_to_run = int(sys.argv[1])
+        except ValueError:
+            pass
+    start_server(port_to_run)

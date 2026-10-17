@@ -86,3 +86,118 @@ Conflicts are flagged only when observations share an explicit grouping context:
 - BUT differing raw values (`95 mg/dL` vs `145 mg/dL`) or incompatible units.
 When a conflict is detected, both observations are preserved, cross-referenced via `conflict_warning_refs`, and highlighted in pipeline warnings.
 
+---
+
+## 6. Milestone 2: PDF Agent Architecture & Spatial Provenance
+
+Milestone 2 extends the platform by implementing the **PDF Agent** and a shared, image-agnostic **Tesseract OCR service**, while preserving the clean hexagonal architecture and contract freeze established in Milestone 1.
+
+### A. Modular Ingestion Pipeline
+
+```
+[CLI / pdf] (Composition Root)
+     │
+     ▼
+[PDFAgent] ──► [PdfReader (PyMuPDF)] ──► [OcrService (Tesseract)]
+     │                 │
+     │                 ▼
+     │        [SourceTextBundle] (with PdfLocation & Table provenance)
+     │                 │
+     ▼                 ▼
+[ExtractionWorkflow] (shared, identical domain extraction engine)
+```
+
+1. **PDFAgent**: Modal agent responsible for validating file limits (`MAX_PDF_BYTES=25MB`, `MAX_PDF_PAGES=50`), invoking `PdfReader`, and handing off the resulting `SourceTextBundle` to the shared `ExtractionWorkflow`.
+2. **PdfReader**: Ingests PDF bytes strictly from memory. Extracts native digital text, detects tables via `page.find_tables()`, plans selective OCR, and deduplicates native vs. OCR text.
+3. **ExtractionWorkflow**: Reused without modification; facts extracted from PDF segments automatically cite `PdfLocation` spatial provenance (page number, bounding box, coordinate space, rendering DPI).
+
+### B. Selective OCR Planning (`plan_page_ocr`)
+
+Full-page OCR on multi-page digital documents is wasteful and slow. `PdfReader` employs a pure, deterministic planning function before invoking OCR:
+- **`ocr_mode="never"`**: OCR is disabled.
+- **`ocr_mode="always"`**: Every page is rasterized and OCR'd.
+- **`ocr_mode="auto"` (default)**:
+  - If native text contains $\ge 40$ alphanumeric characters and contains no large images, OCR is skipped (`decision="none"`).
+  - If raster coverage exceeds 65% of the page or native alphanumeric characters are $< 40$, full page OCR is planned (`decision="full_page"`).
+  - If native text is adequate but the page contains image regions exceeding 8% of the page area with deficient native text, selective OCR is targeted to those image bounding boxes (`decision="selective_regions"`).
+
+### C. Shared `OcrService` Protocol & Render Pixel Budgeting
+
+- **Image-Agnostic Design**: The `OcrService` protocol defines `ocr(image_bytes: bytes, language: str) -> OCRResult`. It operates strictly on raw image bytes (`bytes`), ensuring Milestone 3 (Image Agent) reuses this service without duplicating OCR logic.
+- **Render Budget Enforcement**: Rasterizing high-DPI PDF pages can consume excessive memory. `PdfReader` enforces `MAX_RENDER_PIXELS=20,000,000`. If a target region exceeds the budget at 200 DPI, the engine automatically tries stepwise lower resolutions (150 DPI, then 100 DPI). If the budget is still exceeded at 100 DPI, OCR is skipped cleanly with warning `ocr_skipped_render_budget` rather than risking memory crashes.
+- **Decompression-Bomb Protection**: `TesseractOcrService` checks image dimensions with Pillow before loading and enforces a 60-second per-call execution timeout.
+
+### D. Coordinate Mapping & IoU Deduplication
+
+1. **Coordinate Transformation**:
+   - Clipped pixmaps rendered at `dpi` scale the unrotated PDF coordinates by $\text{scale} = \frac{\text{dpi}}{72.0}$.
+   - Pixel coordinates $[px_0, py_0, px_1, py_1]$ returned by OCR are mapped back to PDF point space:
+     $$x_0 = \text{clip\_x0} + \frac{px_0}{\text{scale}}, \quad y_0 = \text{clip\_y0} + \frac{py_0}{\text{scale}}$$
+2. **IoU Deduplication**:
+   - When OCR is executed on a page that also contains native text, OCR tokens may duplicate native text.
+   - For every OCR segment, the Intersection-over-Union (IoU) with native segments on the same page is computed.
+   - If $\text{IoU} \ge 0.80$ and normalized text matches, the OCR duplicate is suppressed.
+   - If $\text{IoU} \ge 0.80$ but text differs, both segments are preserved, and warning `possible_native_ocr_duplicate` is flagged.
+
+### E. Table Structure Preservation
+- When PyMuPDF's `find_tables` detects structured tables, table cells are extracted per row.
+- Each row is emitted as a `SourceSegment` with `table_id`, `row_id`, and `is_table_header=True` on the first row.
+- In `TextChunker`, table rows are never split across chunks, and table headers are repeated in continuation chunks for contextual continuity.
+
+---
+
+## 7. Milestone 3: Image Agent Architecture & Pillow Safety Boundaries
+
+Milestone 3 implements the **Image Agent** (`ImageAgent`) for ingesting image files (photos of lab slips, paper prescriptions, scanned reports), extracting text via the shared `OcrService`, and delegating fact extraction to the shared `ExtractionWorkflow`.
+
+### A. Critical Scope Distinction: Document Text Ingestion vs Diagnostic ML
+> [!IMPORTANT]
+> The **Image Agent reads TEXT from document images**. It is NOT an image-classification, computer-vision diagnosis, radiology, or pathology model.
+> Clinical entities are extracted from OCR-recognized text; the model does not interpret radiological pixels, anatomical scans, or diagnostic imagery.
+> Handwriting recognition is currently unsupported; low-confidence OCR results on handwritten text are explicitly flagged with `ocr_low_confidence` rather than hidden.
+
+### B. Modular Pipeline & Architecture Layering
+
+```
+[CLI / image] (Composition Root)
+     │
+     ▼
+[ImageAgent] ──► [ImageReader (Pillow)] ──► [OcrService (Shared Tesseract)]
+     │                  │
+     │                  ▼
+     │         [SourceTextBundle] (with ImageLocation pixel coordinates)
+     │                  │
+     ▼                  ▼
+[ExtractionWorkflow] (shared, modality-agnostic clinical extraction engine)
+```
+
+1. **Strict Layering**: `image_agent.py` and `image_reader.py` never import `pytesseract` or `pymupdf`. They consume the image-agnostic `OcrService` protocol injected at runtime.
+2. **Shared Service Identity**: The factory reuses the identical `OcrService` instance across both `PDFAgent` and `ImageAgent`.
+
+### C. Pillow Safety & Decompression-Bomb Defenses
+Processing untrusted clinical images poses security risks (e.g., zip bombs, decompressed pixel floods, malformed metadata). `ImageReader` enforces strict safety invariants:
+1. **Memory-Only Ingestion**: Images are decoded in-memory via `io.BytesIO`. No image data or temporary files are ever written to disk.
+2. **File Size Gate**: Files exceeding `MAX_IMAGE_BYTES=15MB` are rejected immediately prior to buffer parsing (`file_too_large`).
+3. **Format Allowlist**: Only `{"PNG", "JPEG", "WEBP", "BMP", "TIFF"}` formats are permitted. Animated formats (e.g. GIF, animated WEBP, multi-frame TIFF) are rejected with `unsupported_file_type`.
+4. **Dimension Pre-Check**: Image width and height are inspected from metadata before calling `img.load()`. If `width * height > MAX_IMAGE_PIXELS=30,000,000`, the image is rejected immediately with `image_pixel_limit_exceeded`.
+5. **Warning Escalation**: Pillow's `DecompressionBombWarning` is trapped and escalated to a fatal exception via `warnings.catch_warnings()`.
+
+### D. EXIF Transposition & Displayed Pixel Coordinates
+Images captured with mobile devices or clinical cameras frequently contain EXIF orientation tags:
+- `ImageOps.exif_transpose` is applied to align image orientation with how the user displays it.
+- When an orientation tag $\ne 1$ is transposed, `coordinate_system` is set to `"oriented_pixel_top_left"` and `exif_orientation` is preserved in `ImageLocation`.
+- When orientation $= 1$, `coordinate_system` is set to `"pixel_top_left"`.
+
+### E. Invertible Upscaling Transform
+Small or low-resolution slips can produce degraded OCR accuracy:
+- If `upscale_enabled=True` and the shorter side of the image is smaller than `image_upscale_min_side=1000`, the image is preprocessed with grayscale conversion and Lanczos upscaled by scale $S = \min(2.0, \frac{1000}{\min(\text{width}, \text{height})})$.
+- When OCR returns bounding boxes $[px_0, py_0, px_1, py_1]$ in upscaled space, coordinates are mapped back to display pixels via exact inversion:
+  $$x = \frac{px}{S}, \quad y = \frac{py}{S}$$
+- All coordinates are clamped to displayed image boundaries $[0, 0, \text{oriented\_width}, \text{oriented\_height}]$.
+
+### F. OCR Word Confidence & Diagnostics
+- Tesseract per-word confidence scores ($0.0 - 100.0$) are recorded on `ImageLocation.ocr_words`.
+- If any word confidence falls below `settings.ocr_low_confidence=60.0`, the segment is tagged with `ocr_low_confidence` and an aggregate warning is emitted in `AgentResult.warnings`.
+
+
+

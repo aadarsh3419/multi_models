@@ -21,24 +21,23 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 from healthcare_agents.config import get_settings
-from healthcare_agents.contracts import (
-    AgentResult,
-    EvidenceReference,
+from healthcare_agents.contracts.facts import (
+    AssertionStatus,
     EvidenceStatus,
-    ExtractionCandidateRaw,
-    ExtractionResponse,
+    ExperiencerType,
     FactCandidate,
-    TextAgentOptions,
-    TextAgentRequest,
+    FactType,
+    ProviderCandidate,
+    ProviderEvidenceRef,
+    ProviderExtractionResponse,
+    ReportingSourceRole,
+    Temporality,
 )
-from healthcare_agents.extractor_interface import (
-    ClinicalFieldExtractor,
-    ExtractorCallMetadata,
-)
-from healthcare_agents.groq_extractor import GroqFieldExtractor
-from healthcare_agents.source_text import SourceSegment
-from healthcare_agents.text_agent import TextAgent
-from healthcare_agents.workflow import ExtractionWorkflow
+from healthcare_agents.contracts.requests import TextAgentOptions, TextAgentRequest
+from healthcare_agents.contracts.results import AgentResult
+from healthcare_agents.extraction.field_extractor import ClinicalFieldExtractor
+from healthcare_agents.factory import build_text_agent
+from healthcare_agents.providers.groq_field_extractor import GroqFieldExtractor
 
 
 def normalize_comparison_label(label: str | None) -> str:
@@ -70,51 +69,71 @@ class SyntheticBenchmarkFakeExtractor(ClinicalFieldExtractor):
 
     def extract(
         self,
-        segments: list[SourceSegment],
+        unit: Any,
         language_hint: str | None = None,
-    ) -> tuple[ExtractionResponse, ExtractorCallMetadata]:
+    ) -> tuple[ProviderExtractionResponse, dict[str, Any]]:
         self.call_count += 1
-        candidates: list[ExtractionCandidateRaw] = []
-        for text_key, facts in self.expected_facts_by_text.items():
-            if any(s.exact_text in text_key or text_key in s.exact_text for s in segments):
-                for f in facts:
-                    # Ground evidence in the first segment containing the quote
-                    refs: list[EvidenceReference] = []
-                    for q in f.get("expected_quotes", []):
-                        found_seg_id = segments[0].segment_id
-                        for s in segments:
-                            if q in s.exact_text:
-                                found_seg_id = s.segment_id
-                                break
-                        refs.append(EvidenceReference(segment_id=found_seg_id, quote=q))
+        unit_text = getattr(unit, "text", "") or ""
+        unit_id = getattr(unit, "unit_id", "s0001")
+        candidates: list[ProviderCandidate] = []
 
-                    cand = ExtractionCandidateRaw(
-                        fact_type=f["fact_type"],
+        for text_key, facts in self.expected_facts_by_text.items():
+            if unit_text in text_key or text_key in unit_text:
+                for f in facts:
+                    refs = [
+                        ProviderEvidenceRef(segment_id=unit_id, quote=q)
+                        for q in f.get("expected_quotes", [])
+                        if q in unit_text
+                    ]
+                    if not refs and f.get("expected_quotes"):
+                        refs = [
+                            ProviderEvidenceRef(segment_id=unit_id, quote=f["expected_quotes"][0])
+                        ]
+
+                    for field_name in (
+                        "label_raw",
+                        "value_raw",
+                        "unit_raw",
+                        "reference_range_raw",
+                        "abnormal_flag_raw",
+                        "date_raw",
+                    ):
+                        raw_val = f.get(field_name)
+                        if (
+                            raw_val
+                            and str(raw_val) in unit_text
+                            and not any(str(raw_val) in r.quote for r in refs)
+                        ):
+                            refs.append(ProviderEvidenceRef(segment_id=unit_id, quote=str(raw_val)))
+
+                    cand = ProviderCandidate(
+                        fact_type=FactType(f["fact_type"]),
                         label_raw=f["label_raw"],
-                        value_raw=f.get("value_raw"),
-                        unit_raw=f.get("unit_raw"),
-                        reference_range_raw=f.get("reference_range_raw"),
-                        abnormal_flag_raw=f.get("abnormal_flag_raw"),
-                        date_raw=f.get("date_raw"),
-                        assertion_status=f["assertion_status"],
-                        temporality=f["temporality"],
-                        experiencer_type=f["experiencer_type"],
-                        reporting_source_role=f["reporting_source_role"],
+                        value_raw=f.get("value_raw") or "",
+                        unit_raw=f.get("unit_raw") or "",
+                        reference_range_raw=f.get("reference_range_raw") or "",
+                        abnormal_flag_raw=f.get("abnormal_flag_raw") or "",
+                        date_raw=f.get("date_raw") or "",
+                        time_raw=f.get("time_raw") or "",
+                        qualifier_raw=f.get("qualifier_raw") or "",
+                        assertion_status=AssertionStatus(f["assertion_status"]),
+                        temporality=Temporality(f["temporality"]),
+                        experiencer_type=ExperiencerType(f["experiencer_type"]),
+                        experiencer_relationship_raw=f.get("experiencer_relationship_raw") or "",
+                        reporting_source_role=ReportingSourceRole(
+                            f.get("reporting_source_role", "clinician")
+                        ),
                         evidence_refs=refs,
                     )
                     candidates.append(cand)
                 break
 
-        resp = ExtractionResponse(candidates=candidates)
-        meta = ExtractorCallMetadata(
-            provider_name="offline_synthetic_double",
-            model_id="benchmark-fake-v1",
-            response_id=f"bench_resp_{self.call_count}",
-            input_tokens=100,
-            output_tokens=50,
-            attempts_made=1,
-            duration_ms=1.0,
-        )
+        resp = ProviderExtractionResponse(candidates=candidates)
+        meta = {
+            "provider": "offline_synthetic_double",
+            "model_id": "benchmark-fake-v1",
+            "response_id": f"bench_resp_{self.call_count}",
+        }
         return resp, meta
 
 
@@ -190,12 +209,7 @@ def run_benchmark(
     else:
         extractor = SyntheticBenchmarkFakeExtractor(expected_facts_by_text=facts_by_text)
 
-    workflow = ExtractionWorkflow(
-        extractor=extractor,
-        date_order="UNKNOWN",
-        max_llm_calls_per_request=8,
-    )
-    agent = TextAgent(workflow=workflow)
+    agent = build_text_agent(settings=settings, extractor=extractor)
 
     total_tp = 0
     total_fp = 0
